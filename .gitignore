@@ -3,6 +3,8 @@
 
 # Python cache
 data/main.db
+data/main.db-shm
+data/main.db-wal
 logs/
 __pycache__/
 *.pyc
