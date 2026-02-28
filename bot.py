@@ -20,8 +20,6 @@ ROOT = pathlib.Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
-load_dotenv(ROOT / ".env")
-
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -48,9 +46,14 @@ from bot.handlers.admin import (
 
 log = setup_logger()
 
-BOT_TOKEN       = os.getenv("BOT_TOKEN")
-PARSER_INTERVAL = int(os.getenv("PARSER_INTERVAL", 30)) * 60
-MOSCOW_TZ       = timezone("Europe/Moscow")
+from utils.config import (
+    BOT_TOKEN, PARSER_INTERVAL, QUEUE_MODE,
+    EXPIRE_CHECK_INTERVAL,
+    FINAL_PARSER_HOUR, FINAL_PARSER_MINUTE,
+    NEW_DAY_HOUR, NEW_DAY_MINUTE,
+    validate as validate_config,
+)
+MOSCOW_TZ = timezone("Europe/Moscow")
 
 _parser_lock = asyncio.Lock()
 
@@ -197,8 +200,10 @@ async def job_check_expired(context):
 # ── Запуск ────────────────────────────────────────────────────────────────────
 
 def run():
-    if not BOT_TOKEN:
-        log.error("BOT_TOKEN не найден в .env")
+    try:
+        validate_config()
+    except ValueError as e:
+        log.error(f".env ошибка: {e}")
         sys.exit(1)
 
     log.info("=" * 50)
@@ -283,9 +288,9 @@ def run():
     # ── Планировщик ───────────────────────────────────────────────────────────
     jq = app.job_queue
     jq.run_repeating(job_auto_parser,    interval=PARSER_INTERVAL, first=60,    name="auto_parser")
-    jq.run_repeating(job_check_expired,  interval=5 * 60,          first=60,    name="check_expired")
-    jq.run_daily(job_final_parser, time=dtime(hour=23, minute=55, tzinfo=MOSCOW_TZ), name="final_parser")
-    jq.run_daily(job_new_day,      time=dtime(hour=0,  minute=1,  tzinfo=MOSCOW_TZ), name="new_day")
+    jq.run_repeating(job_check_expired,  interval=EXPIRE_CHECK_INTERVAL, first=60, name="check_expired")
+    jq.run_daily(job_final_parser, time=dtime(hour=FINAL_PARSER_HOUR, minute=FINAL_PARSER_MINUTE, tzinfo=MOSCOW_TZ), name="final_parser")
+    jq.run_daily(job_new_day,      time=dtime(hour=NEW_DAY_HOUR,      minute=NEW_DAY_MINUTE,      tzinfo=MOSCOW_TZ), name="new_day")
 
     log.info(
         f"[scheduler] Автопарсер каждые {PARSER_INTERVAL // 60} мин, "

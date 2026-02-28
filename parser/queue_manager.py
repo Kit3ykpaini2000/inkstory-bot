@@ -17,7 +17,8 @@ parser/queue_manager.py — управление очередью жюри
 import random
 from datetime import datetime, timezone
 
-from utils.database import get_db, get_queue_mode, get_expire_minutes
+from utils.database import get_db
+from utils.config import QUEUE_MODE, EXPIRE_MINUTES
 from utils.logger import setup_logger
 
 log = setup_logger()
@@ -64,7 +65,7 @@ def assign_post(post_id: int) -> str | None:
 
     Возвращает TGID назначенного жюри или None (в режиме open или нет жюри).
     """
-    mode = get_queue_mode()
+    mode = QUEUE_MODE
 
     if mode == "open":
         with get_db() as db:
@@ -248,7 +249,7 @@ def release_expired_posts() -> list[dict]:
     Возвращает список {post_id, reviewer_tgid, type: 'taken'|'assigned'}
     только для case 1 (для уведомлений).
     """
-    expire = get_expire_minutes()
+    expire = EXPIRE_MINUTES
     released = []
 
     with get_db() as db:

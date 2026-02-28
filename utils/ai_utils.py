@@ -1,21 +1,11 @@
 """
 utils/ai_utils.py — проверка текста поста через Groq API
-
-Логика:
-1. Текст разбивается на части если слишком большой (>3000 символов)
-2. Каждая часть проверяется через Groq (llama-3.3-70b-versatile)
-3. Возвращает список строк для отправки жюри
-4. Результат в БД не сохраняется
 """
 
-import os
-from groq import Groq
+from utils.config import GROQ_API_KEY, GROQ_MODEL, AI_CHUNK_SIZE
 from utils.logger import setup_logger
 
 log = setup_logger()
-
-MAX_CHUNK_SIZE = 3000
-MODEL          = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT = """Ты — строгий корректор текста на русском языке.
 Твоя задача — найти ВСЕ ошибки: орфографические, грамматические, пунктуационные, стилистические.
@@ -31,21 +21,21 @@ SYSTEM_PROMPT = """Ты — строгий корректор текста на 
 Не добавляй никакого другого текста до или после."""
 
 
-def _get_client() -> Groq:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("GROQ_API_KEY не найден в .env")
-    return Groq(api_key=api_key)
+def _get_client():
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY не задан в .env")
+    from groq import Groq
+    return Groq(api_key=GROQ_API_KEY)
 
 
-def _split_text(text: str, chunk_size: int = MAX_CHUNK_SIZE) -> list[str]:
-    """Разбивает текст на части по абзацам не превышая chunk_size символов."""
-    if len(text) <= chunk_size:
+def _split_text(text: str) -> list[str]:
+    """Разбивает текст на части по абзацам не превышая AI_CHUNK_SIZE символов."""
+    if len(text) <= AI_CHUNK_SIZE:
         return [text]
 
     chunks, current = [], ""
     for para in text.split("\n"):
-        if len(current) + len(para) + 1 > chunk_size:
+        if len(current) + len(para) + 1 > AI_CHUNK_SIZE:
             if current:
                 chunks.append(current.strip())
             current = para
@@ -58,11 +48,11 @@ def _split_text(text: str, chunk_size: int = MAX_CHUNK_SIZE) -> list[str]:
     return chunks or [text]
 
 
-def _check_chunk(client: Groq, text: str, part: int, total: int) -> str:
+def _check_chunk(client, text: str, part: int, total: int) -> str:
     prefix = f"[Часть {part}/{total}]\n\n" if total > 1 else ""
     try:
         response = client.chat.completions.create(
-            model=MODEL,
+            model=GROQ_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": f"Проверь текст:\n\n{text}"},

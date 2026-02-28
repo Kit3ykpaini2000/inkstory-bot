@@ -1,25 +1,18 @@
 """
 parser/links.py — сбор ссылок на посты через JSON API inkstory.net
-
-Логика:
-1. Берём все известные ссылки из таблицы links
-2. Постранично запрашиваем API (сортировка по дате убывания)
-3. Останавливаемся когда встречаем ссылку которая уже есть в БД
-4. Новые ссылки сохраняем с Parsed=0
 """
 
 import time
 import requests
 
 from utils.database import get_db
+from utils.config import PAGE_SIZE, PAGE_PAUSE_LINKS
 from utils.logger import setup_logger
 
 log = setup_logger()
 
-API_URL    = "https://api.inkstory.net/v2/discussions"
-SITE_BASE  = "https://inkstory.net"
-PAGE_SIZE  = 20
-PAGE_PAUSE = 1.0
+API_URL   = "https://api.inkstory.net/v2/discussions"
+SITE_BASE = "https://inkstory.net"
 
 HEADERS = {
     "User-Agent": (
@@ -95,10 +88,7 @@ def _extract_links(data: dict | list) -> tuple[list[str], bool]:
 
 
 def parse() -> int:
-    """
-    Собирает новые ссылки и сохраняет их в БД с Parsed=0.
-    Возвращает количество новых ссылок.
-    """
+    """Собирает новые ссылки. Возвращает количество новых."""
     known     = _get_known_links()
     blacklist = _get_blacklist()
     log.info(f"[links] Известных: {len(known)}, в блэклисте: {len(blacklist)}")
@@ -108,15 +98,12 @@ def parse() -> int:
     stop = False
 
     while not stop:
-        log.debug(f"[links] Запрашиваем страницу {page}")
         data = _fetch_page(page)
-
         if data is None:
             log.warning(f"[links] Не удалось получить страницу {page}, останавливаемся")
             break
 
         page_urls, has_next = _extract_links(data)
-
         if not page_urls:
             log.info(f"[links] Страница {page} пустая — конец")
             break
@@ -133,7 +120,7 @@ def parse() -> int:
 
         if not stop and has_next:
             page += 1
-            time.sleep(PAGE_PAUSE)
+            time.sleep(PAGE_PAUSE_LINKS)
         else:
             break
 

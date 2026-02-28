@@ -14,13 +14,12 @@ import requests
 from bs4 import BeautifulSoup
 
 from utils.database import get_db
+from utils.config import PAGE_PAUSE_POSTS
 from utils.logger import setup_logger
 from utils.word_counter import count_words
 from parser.queue_manager import assign_post
 
 log = setup_logger()
-
-PAGE_PAUSE = 1.5
 
 HEADERS = {
     "User-Agent": (
@@ -233,7 +232,7 @@ def parse() -> dict[str, int]:
             if tgid:
                 assigned[tgid] = assigned.get(tgid, 0) + 1
 
-        time.sleep(PAGE_PAUSE)
+        time.sleep(PAGE_PAUSE_POSTS)
 
     _mark_links_parsed(parsed_urls)
     log.info(f"[posts] Помечено Parsed=1: {len(parsed_urls)}, новых в очереди: {sum(assigned.values())}")

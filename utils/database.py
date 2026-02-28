@@ -1,5 +1,5 @@
 """
-utils/database.py — подключение к БД и хелперы конфига
+utils/database.py — подключение к БД
 """
 
 import sqlite3
@@ -29,33 +29,3 @@ def get_db():
         yield conn
     finally:
         conn.close()
-
-
-def get_config(key: str, default: str | None = None) -> str | None:
-    """Читает значение из таблицы config."""
-    with get_db() as db:
-        row = db.execute(
-            "SELECT Value FROM config WHERE Key = ?", (key,)
-        ).fetchone()
-        return row["Value"] if row else default
-
-
-def set_config(key: str, value: str) -> None:
-    """Записывает значение в таблицу config."""
-    with get_db() as db:
-        db.execute(
-            "INSERT INTO config (Key, Value) VALUES (?, ?) "
-            "ON CONFLICT(Key) DO UPDATE SET Value = excluded.Value",
-            (key, value),
-        )
-        db.commit()
-
-
-def get_queue_mode() -> str:
-    """Возвращает текущий режим очереди: 'open' или 'distributed'."""
-    return get_config("queue_mode", "distributed")
-
-
-def get_expire_minutes() -> int:
-    """Возвращает время истечения резервации в минутах."""
-    return int(get_config("expire_minutes", "30"))

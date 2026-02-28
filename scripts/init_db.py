@@ -95,14 +95,6 @@ CREATE TABLE IF NOT EXISTS results (
     Reviewer      TEXT REFERENCES reviewers(TGID)
 );
 
--- ── Конфигурация ─────────────────────────────────────────────────────────────
--- queue_mode     : 'open' | 'distributed'
--- expire_minutes : целое число (по умолчанию 30)
-CREATE TABLE IF NOT EXISTS config (
-    Key   TEXT PRIMARY KEY,
-    Value TEXT NOT NULL
-);
-
 -- ── Индексы ───────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_links_parsed       ON links(Parsed);
 CREATE INDEX IF NOT EXISTS idx_posts_status       ON posts_info(Status);
@@ -112,11 +104,6 @@ CREATE INDEX IF NOT EXISTS idx_queue_takenat      ON queue(TakenAt);
 CREATE INDEX IF NOT EXISTS idx_results_reviewer   ON results(Reviewer);
 """
 
-DEFAULTS = [
-    ("queue_mode",     "distributed"),
-    ("expire_minutes", "30"),
-]
-
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -125,12 +112,6 @@ def init_db() -> None:
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.executescript(SCHEMA)
-        # Вставляем дефолтные значения конфига только если их нет
-        for key, value in DEFAULTS:
-            conn.execute(
-                "INSERT OR IGNORE INTO config (Key, Value) VALUES (?, ?)",
-                (key, value),
-            )
         conn.commit()
     finally:
         conn.close()
@@ -149,10 +130,7 @@ def init_db() -> None:
         count = conn.execute(f"SELECT COUNT(*) FROM {t['name']}").fetchone()[0]
         print(f"  {t['name']:<20} {count} записей")
 
-    print()
-    print("Конфиг:")
-    for row in conn.execute("SELECT Key, Value FROM config ORDER BY Key").fetchall():
-        print(f"  {row['Key']:<20} = {row['Value']}")
+
     conn.close()
 
 

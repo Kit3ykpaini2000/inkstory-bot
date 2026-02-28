@@ -9,6 +9,7 @@ from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
 
 from utils.database import get_db
+from utils.config import MAX_WORDS, MAX_ERRORS
 from utils.ai_utils import check_post
 from utils.logger import setup_logger
 from parser.queue_manager import (
@@ -30,9 +31,6 @@ log = setup_logger()
     WAITING_REJECT_REASON,
     WAITING_REJECT_CUSTOM,
 ) = range(6)
-
-MAX_WORDS  = 100_000
-MAX_ERRORS = 10_000
 
 
 # ── Хелперы БД ────────────────────────────────────────────────────────────────

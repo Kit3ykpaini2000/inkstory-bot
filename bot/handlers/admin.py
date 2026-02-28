@@ -11,7 +11,8 @@ import pathlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from utils.database import get_db, get_queue_mode, set_config
+from utils.database import get_db
+from utils.config import QUEUE_MODE
 from utils.logger import setup_logger
 from parser.queue_manager import (
     get_total_queue_count, get_all_reviewer_queue_sizes, assign_post,
@@ -53,7 +54,7 @@ def _get_stats() -> dict:
         "checked":   checked,
         "rejected":  rejected,
         "reviewers": reviewers,
-        "mode":      get_queue_mode(),
+        "mode":      QUEUE_MODE,
     }
 
 
@@ -195,7 +196,7 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Режим очереди ─────────────────────────────────────────────────────────
     elif data == "admin_queue_mode":
-        mode = get_queue_mode()
+        mode = QUEUE_MODE
         await query.edit_message_text(
             f"⚙️ Режим очереди (текущий: {mode}):",
             reply_markup=queue_mode_keyboard(mode),
@@ -203,11 +204,11 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data in ("qmode_open", "qmode_distributed"):
         new_mode = data.replace("qmode_", "")
-        set_config("queue_mode", new_mode)
-        log.info(f"[admin] Режим очереди изменён на {new_mode}")
         await query.edit_message_text(
-            f"✅ Режим изменён на: {new_mode}",
-            reply_markup=queue_mode_keyboard(new_mode),
+            f"⚙️ Режим очереди нельзя изменить через бота.
+
+Измени QUEUE_MODE в файле .env и перезапусти бота.",
+            reply_markup=back_keyboard(),
         )
 
     # ── Логи ──────────────────────────────────────────────────────────────────
@@ -239,7 +240,7 @@ async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = data.replace("admin_verify_", "")
         _set_verified(target_id, 1)
         # Назначаем ему посты если режим distributed
-        if get_queue_mode() == "distributed":
+        if QUEUE_MODE == "distributed":
             with get_db() as db:
                 free = db.execute(
                     "SELECT Post FROM queue WHERE Reviewer IS NULL LIMIT 10"
