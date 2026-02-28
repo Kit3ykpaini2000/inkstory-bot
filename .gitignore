@@ -11,6 +11,8 @@ __pycache__/
 # БД и данные
 data/main.db
 data/*.db
+data/*.db-wal
+data/*.db-shm
 
 # Логи
 logs/
