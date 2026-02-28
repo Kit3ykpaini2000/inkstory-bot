@@ -5,10 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Замени 'pi' на своего пользователя (команда: whoami)
-User=pi
-WorkingDirectory=/home/pi/inkstory
-ExecStart=/home/pi/inkstory/venv/bin/python bot.py
+
+# Замени на своего пользователя (узнать командой: whoami)
+User=YOUR_USER
+
+# Замени на путь к папке с проектом (узнать командой: pwd)
+WorkingDirectory=/home/YOUR_USER/inkstory_parser
+
+# Замени на путь к python в venv (должен совпадать с WorkingDirectory)
+ExecStart=/home/YOUR_USER/inkstory_parser/venv/bin/python bot.py
+
 Restart=always
 RestartSec=5
 StandardOutput=journal
