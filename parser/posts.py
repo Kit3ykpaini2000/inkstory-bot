@@ -14,7 +14,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from utils.database import get_db
-from utils.config import PAGE_PAUSE_POSTS
+from utils.config import PAGE_PAUSE_POSTS, QUEUE_MODE
 from utils.logger import setup_logger
 from utils.word_counter import count_words
 from parser.queue_manager import assign_post
@@ -230,7 +230,11 @@ def parse() -> dict[str, int]:
         if post_id:
             tgid = assign_post(post_id)
             if tgid:
+                # distributed — считаем по каждому жюри
                 assigned[tgid] = assigned.get(tgid, 0) + 1
+            else:
+                # open — считаем общее количество новых постов под ключом None
+                assigned[None] = assigned.get(None, 0) + 1
 
         time.sleep(PAGE_PAUSE_POSTS)
 

@@ -109,6 +109,9 @@ async def job_auto_parser(context):
     if not assigned:
         return
 
+    open_count = assigned.pop(None, 0)
+
+    # distributed — уведомляем каждого жюри персонально
     for tg_id, count in assigned.items():
         try:
             await context.bot.send_message(
@@ -122,6 +125,21 @@ async def job_auto_parser(context):
         except Exception as e:
             log.warning(f"[job] Не удалось уведомить {tg_id}: {e}")
 
+    # open — уведомляем всех верифицированных жюри
+    if open_count > 0:
+        for tg_id in _get_all_reviewer_ids():
+            try:
+                await context.bot.send_message(
+                    chat_id=tg_id,
+                    text=(
+                        f"📬 Появились новые посты!\n\n"
+                        f"🆕 Новых в очереди: {open_count}\n\n"
+                        f"/next — взять пост"
+                    ),
+                )
+            except Exception as e:
+                log.warning(f"[job] Не удалось уведомить {tg_id}: {e}")
+
 
 async def job_final_parser(context):
     log.info("[job] Финальный парсинг дня (23:55)")
@@ -129,6 +147,9 @@ async def job_final_parser(context):
     if not assigned:
         return
 
+    open_count = assigned.pop(None, 0)
+
+    # distributed — уведомляем каждого жюри персонально
     for tg_id, count in assigned.items():
         try:
             await context.bot.send_message(
@@ -141,6 +162,21 @@ async def job_final_parser(context):
             )
         except Exception as e:
             log.warning(f"[job] Не удалось уведомить {tg_id}: {e}")
+
+    # open — уведомляем всех верифицированных жюри
+    if open_count > 0:
+        for tg_id in _get_all_reviewer_ids():
+            try:
+                await context.bot.send_message(
+                    chat_id=tg_id,
+                    text=(
+                        f"📬 Финальный сбор постов дня!\n\n"
+                        f"🆕 Новых в очереди: {open_count}\n\n"
+                        f"/next — взять пост"
+                    ),
+                )
+            except Exception as e:
+                log.warning(f"[job] Не удалось уведомить {tg_id}: {e}")
 
 
 async def job_new_day(context):
@@ -161,26 +197,51 @@ async def job_check_expired(context):
 
     log.info(f"[expired] Освобождено: {len(released)}")
 
+    notified_taken = set()
+
     # Уведомляем жюри у которых забрали посты
-    notified = set()
     for item in released:
+        if item["type"] != "taken":
+            continue
         tgid = item["reviewer_tgid"]
-        notified.add(tgid)
+        notified_taken.add(tgid)
         try:
             await context.bot.send_message(
                 chat_id=tgid,
                 text=(
                     "⏰ У тебя истекло время на проверку!\n\n"
-                    "Пост возвращён в общую очередь.\n\n"
+                    "Пост возвращён в очередь.\n\n"
                     "Если хочешь продолжить — используй /next."
                 ),
             )
         except Exception as e:
             log.warning(f"[expired] Не удалось уведомить {tgid}: {e}")
 
-    # Уведомляем остальных жюри о свободных постах
+    # Уведомляем новых жюри которым переназначили посты (distributed)
+    reassigned: dict[str, int] = {}
+    for item in released:
+        if item["type"] != "reassigned":
+            continue
+        tgid = item["reviewer_tgid"]
+        reassigned[tgid] = reassigned.get(tgid, 0) + 1
+
+    for tgid, count in reassigned.items():
+        try:
+            await context.bot.send_message(
+                chat_id=tgid,
+                text=(
+                    f"📬 Тебе назначен{'ы' if count > 1 else''} пост{'ы' if count > 1 else''}!\n\n"
+                    f"🔄 Переназначено из-за истечения времени у другого жюри: {count}\n\n"
+                    f"/next — взять пост"
+                ),
+            )
+        except Exception as e:
+            log.warning(f"[expired] Не удалось уведомить {tgid}: {e}")
+
+    # В режиме open уведомляем остальных жюри о свободных постах
     free_count = get_free_posts_count()
     if free_count > 0:
+        notified = notified_taken | set(reassigned.keys())
         for tgid in _get_all_reviewer_ids():
             if tgid in notified:
                 continue

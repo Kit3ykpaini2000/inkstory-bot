@@ -239,15 +239,19 @@ def release_expired_posts() -> list[dict]:
     Два случая:
     1. Жюри взял пост (TakenAt IS NOT NULL) но не проверил за expire_minutes
        → Reviewer=NULL, TakenAt=NULL, Status='pending'
-       → уведомляем жюри что у него забрали пост
+       → в режиме distributed сразу переназначается новому жюри
+       → уведомляем старого жюри что пост забрали,
+         и нового жюри (distributed) что ему назначен пост
 
     2. В режиме distributed пост назначен (Reviewer IS NOT NULL)
        но не взят (TakenAt IS NULL) за expire_minutes
-       → Reviewer=NULL (становится свободным)
-       → без уведомления (жюри ещё даже не видел пост)
+       → переназначается другому жюри
+       → без уведомления (старый жюри ещё даже не видел пост,
+         новый получит уведомление)
 
-    Возвращает список {post_id, reviewer_tgid, type: 'taken'|'assigned'}
-    только для case 1 (для уведомлений).
+    Возвращает список:
+      {post_id, reviewer_tgid, type: 'taken'}         — для уведомления старого жюри
+      {post_id, reviewer_tgid, type: 'reassigned'}    — для уведомления нового жюри
     """
     expire = EXPIRE_MINUTES
     released = []
@@ -274,12 +278,30 @@ def release_expired_posts() -> list[dict]:
                 "UPDATE posts_info SET Status='pending' WHERE ID=?",
                 (row["Post"],),
             )
+            db.commit()
             released.append({
                 "post_id":       row["Post"],
                 "reviewer_tgid": row["Reviewer"],
                 "type":          "taken",
             })
             log.info(f"[queue] Пост #{row['Post']} истёк (взят) у {row['Reviewer']}")
+
+            # В режиме distributed — сразу переназначаем новому жюри
+            if QUEUE_MODE == "distributed":
+                new_tgid = _reviewer_with_least_queue()
+                if new_tgid and new_tgid != row["Reviewer"]:
+                    with get_db() as db2:
+                        db2.execute(
+                            "UPDATE queue SET Reviewer=?, AssignedAt=? WHERE Post=?",
+                            (new_tgid, _now_utc(), row["Post"]),
+                        )
+                        db2.commit()
+                    released.append({
+                        "post_id":       row["Post"],
+                        "reviewer_tgid": new_tgid,
+                        "type":          "reassigned",
+                    })
+                    log.info(f"[queue] Пост #{row['Post']} переназначен → {new_tgid}")
 
         # Case 2: назначен но не взят (только distributed)
         assigned = db.execute(
@@ -299,14 +321,31 @@ def release_expired_posts() -> list[dict]:
                 "UPDATE queue SET Reviewer=NULL WHERE Post=?",
                 (row["Post"],),
             )
+            db.commit()
             log.info(f"[queue] Пост #{row['Post']} истёк (назначен) у {row['Reviewer']}")
 
-        db.commit()
+            # Переназначаем другому жюри
+            new_tgid = _reviewer_with_least_queue()
+            if new_tgid and new_tgid != row["Reviewer"]:
+                with get_db() as db2:
+                    db2.execute(
+                        "UPDATE queue SET Reviewer=?, AssignedAt=? WHERE Post=?",
+                        (new_tgid, _now_utc(), row["Post"]),
+                    )
+                    db2.commit()
+                released.append({
+                    "post_id":       row["Post"],
+                    "reviewer_tgid": new_tgid,
+                    "type":          "reassigned",
+                })
+                log.info(f"[queue] Пост #{row['Post']} переназначен → {new_tgid}")
 
-    if released:
-        log.info(f"[queue] Освобождено просроченных (взятых): {len(released)}")
-    if assigned:
-        log.info(f"[queue] Освобождено просроченных (назначенных): {len(assigned)}")
+    taken_count     = sum(1 for r in released if r["type"] == "taken")
+    reassigned_count = sum(1 for r in released if r["type"] == "reassigned")
+    if taken_count:
+        log.info(f"[queue] Освобождено просроченных (взятых): {taken_count}")
+    if reassigned_count:
+        log.info(f"[queue] Переназначено: {reassigned_count}")
 
     return released
 
