@@ -397,4 +397,3 @@ def get_all_reviewer_queue_sizes() -> list[dict]:
             """
         ).fetchall()
     return [{"tgid": r["TGID"], "name": r["Name"], "count": r["cnt"]} for r in rows]
-
