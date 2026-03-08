@@ -1,17 +1,20 @@
 """
 parser/queue_manager.py — управление очередью жюри
 
-Два режима (задаются в таблице config, ключ queue_mode):
+Три режима (QUEUE_MODE в .env):
 
   open         — общая очередь, любой жюри берёт первый свободный пост через /next
-  distributed  — пост сразу назначается жюри с наименьшей очередью
+  distributed  — пост назначается жюри с наименьшей текущей очередью
+  balanced     — пост назначается жюри с наименьшей суммарной нагрузкой:
+                 проверено + отклонено + в очереди (прошлый вклад учитывается)
 
-В обоих режимах:
-  - Если жюри взял пост (TakenAt IS NOT NULL) но не проверил за expire_minutes минут
-    → Reviewer=NULL, TakenAt=NULL, Status='pending' (пост снова свободен)
-  - Если в режиме distributed пост назначен (Reviewer IS NOT NULL)
-    но не взят (TakenAt IS NULL) за expire_minutes минут
-    → Reviewer=NULL (становится свободным как в open)
+В любом режиме:
+  - Жюри взял пост (TakenAt NOT NULL) но не проверил за EXPIRE_MINUTES →
+      Reviewer=NULL, TakenAt=NULL, Status='pending', уведомляем старого жюри
+  - distributed/balanced: пост назначен (Reviewer NOT NULL) но не взят за EXPIRE_MINUTES →
+      переназначаем другому жюри, уведомляем нового
+  - open: пост был Reviewer=NULL и всё равно не взят — такого быть не может
+    (в open посты сразу NULL, их забирают через /next)
 """
 
 import random
@@ -28,18 +31,17 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-# ── Распределение ─────────────────────────────────────────────────────────────
+# ── Выбор жюри ────────────────────────────────────────────────────────────────
 
-def _reviewer_with_least_queue() -> str | None:
+def _reviewer_least_queue() -> str | None:
     """
-    Возвращает TGID верифицированного жюри с наименьшей очередью.
-    При ничье выбирает случайно.
+    distributed: жюри с наименьшим количеством постов в текущей очереди.
+    При ничье — случайно.
     """
     with get_db() as db:
         rows = db.execute(
             """
-            SELECT rv.TGID,
-                   COUNT(q.Post) AS cnt
+            SELECT rv.TGID, COUNT(q.Post) AS cnt
             FROM reviewers rv
             LEFT JOIN queue q ON q.Reviewer = rv.TGID
             WHERE rv.Verified = 1
@@ -56,18 +58,64 @@ def _reviewer_with_least_queue() -> str | None:
     return random.choice(candidates)
 
 
+def _reviewer_least_total() -> str | None:
+    """
+    balanced: жюри с наименьшей суммой (проверено + отклонено + в_очереди).
+    При ничье — случайно.
+    """
+    with get_db() as db:
+        rows = db.execute(
+            """
+            SELECT
+                rv.TGID,
+                COUNT(DISTINCT q.Post) AS in_queue,
+                COUNT(DISTINCT CASE WHEN r.HumanWords IS NOT NULL THEN r.Post END) AS checked,
+                COUNT(DISTINCT CASE WHEN p2.Status = 'rejected' AND r2.Reviewer = rv.TGID
+                                    THEN r2.Post END) AS rejected
+            FROM reviewers rv
+            LEFT JOIN queue   q  ON q.Reviewer  = rv.TGID
+            LEFT JOIN results r  ON r.Reviewer  = rv.TGID
+            LEFT JOIN results r2 ON r2.Reviewer = rv.TGID
+            LEFT JOIN posts_info p2 ON p2.ID = r2.Post
+            WHERE rv.Verified = 1
+            GROUP BY rv.TGID
+            ORDER BY (in_queue + checked + rejected) ASC
+            """
+        ).fetchall()
+
+    if not rows:
+        return None
+
+    min_total  = rows[0]["in_queue"] + rows[0]["checked"] + rows[0]["rejected"]
+    candidates = [
+        r["TGID"] for r in rows
+        if r["in_queue"] + r["checked"] + r["rejected"] == min_total
+    ]
+    return random.choice(candidates)
+
+
+def _pick_reviewer() -> str | None:
+    """Выбирает жюри согласно текущему режиму."""
+    if QUEUE_MODE == "distributed":
+        return _reviewer_least_queue()
+    if QUEUE_MODE == "balanced":
+        return _reviewer_least_total()
+    return None  # open — без назначения
+
+
+# ── Добавление в очередь ──────────────────────────────────────────────────────
+
 def assign_post(post_id: int) -> str | None:
     """
     Добавляет пост в очередь согласно текущему режиму.
 
     open        → queue(Post, Reviewer=NULL)
-    distributed → queue(Post, Reviewer=<жюри с минимальной очередью>)
+    distributed → queue(Post, Reviewer=<жюри с мин. очередью>)
+    balanced    → queue(Post, Reviewer=<жюри с мин. суммарной нагрузкой>)
 
-    Возвращает TGID назначенного жюри или None (в режиме open или нет жюри).
+    Возвращает TGID назначенного жюри или None (open / нет жюри).
     """
-    mode = QUEUE_MODE
-
-    if mode == "open":
+    if QUEUE_MODE == "open":
         with get_db() as db:
             db.execute(
                 "INSERT OR IGNORE INTO queue (Post, Reviewer, AssignedAt) VALUES (?,NULL,?)",
@@ -77,10 +125,8 @@ def assign_post(post_id: int) -> str | None:
         log.info(f"[queue] Пост #{post_id} → общая очередь (open)")
         return None
 
-    # distributed
-    tgid = _reviewer_with_least_queue()
+    tgid = _pick_reviewer()
     if not tgid:
-        # Жюри нет — кладём в общую как в open
         with get_db() as db:
             db.execute(
                 "INSERT OR IGNORE INTO queue (Post, Reviewer, AssignedAt) VALUES (?,NULL,?)",
@@ -97,7 +143,7 @@ def assign_post(post_id: int) -> str | None:
         )
         db.commit()
 
-    log.info(f"[queue] Пост #{post_id} → {tgid} (distributed)")
+    log.info(f"[queue] Пост #{post_id} → {tgid} ({QUEUE_MODE})")
     return tgid
 
 
@@ -105,13 +151,13 @@ def assign_post(post_id: int) -> str | None:
 
 def take_post(tgid: str) -> dict | None:
     """
-    Атомарно резервирует следующий пост для жюри (вызывается при /next).
+    Атомарно резервирует следующий пост для жюри (/next).
 
     Порядок поиска:
     1. Пост уже назначен этому жюри и не взят (Reviewer=tgid, TakenAt IS NULL)
     2. Свободный пост (Reviewer IS NULL, TakenAt IS NULL)
 
-    Возвращает dict с данными поста или None если нет доступных.
+    Возвращает dict или None если нет доступных.
     """
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -119,15 +165,14 @@ def take_post(tgid: str) -> dict | None:
         # 1. Свой назначенный пост
         row = db.execute(
             """
-            SELECT q.Post, p.URL, a.Name AS author, r.BotWords,
-                   q.AssignedAt, q.TakenAt
+            SELECT q.Post, p.URL, a.Name AS author, r.BotWords
             FROM queue q
             JOIN posts_info p ON q.Post = p.ID
             JOIN authors    a ON p.Author = a.ID
             LEFT JOIN results r ON r.Post = p.ID
-            WHERE q.Reviewer  = ?
-              AND q.TakenAt   IS NULL
-              AND p.Status    = 'pending'
+            WHERE q.Reviewer = ?
+              AND q.TakenAt  IS NULL
+              AND p.Status   = 'pending'
             ORDER BY q.AssignedAt ASC
             LIMIT 1
             """,
@@ -138,8 +183,7 @@ def take_post(tgid: str) -> dict | None:
         if not row:
             row = db.execute(
                 """
-                SELECT q.Post, p.URL, a.Name AS author, r.BotWords,
-                       q.AssignedAt, q.TakenAt
+                SELECT q.Post, p.URL, a.Name AS author, r.BotWords
                 FROM queue q
                 JOIN posts_info p ON q.Post = p.ID
                 JOIN authors    a ON p.Author = a.ID
@@ -159,7 +203,6 @@ def take_post(tgid: str) -> dict | None:
         post_id = row["Post"]
         now     = _now_utc()
 
-        # Резервируем: назначаем жюри и ставим TakenAt
         db.execute(
             "UPDATE queue SET Reviewer=?, TakenAt=? WHERE Post=? AND TakenAt IS NULL",
             (tgid, now, post_id),
@@ -172,15 +215,15 @@ def take_post(tgid: str) -> dict | None:
 
     log.info(f"[queue] Жюри {tgid} взял пост #{post_id}")
     return {
-        "post_id": post_id,
-        "url":     row["url"],
-        "author":  row["author"],
+        "post_id":   post_id,
+        "url":       row["url"],
+        "author":    row["author"],
         "bot_words": row["BotWords"],
     }
 
 
 def get_active_post(tgid: str) -> dict | None:
-    """Возвращает пост который жюри уже взял но ещё не проверил."""
+    """Возвращает пост который жюри взял но ещё не проверил."""
     with get_db() as db:
         row = db.execute(
             """
@@ -208,7 +251,7 @@ def get_active_post(tgid: str) -> dict | None:
 
 
 def release_post(tgid: str, post_id: int) -> None:
-    """Освобождает пост обратно в очередь (отмена через /cancel)."""
+    """Освобождает пост обратно в очередь (/cancel)."""
     with get_db() as db:
         db.execute(
             "UPDATE queue SET Reviewer=NULL, TakenAt=NULL WHERE Post=? AND Reviewer=?",
@@ -223,7 +266,7 @@ def release_post(tgid: str, post_id: int) -> None:
 
 
 def remove_post(post_id: int) -> None:
-    """Удаляет пост из очереди полностью (после проверки или отклонения)."""
+    """Удаляет пост из очереди (после проверки или отклонения)."""
     with get_db() as db:
         db.execute("DELETE FROM queue WHERE Post=?", (post_id,))
         db.commit()
@@ -234,76 +277,22 @@ def remove_post(post_id: int) -> None:
 
 def release_expired_posts() -> list[dict]:
     """
-    Освобождает просроченные посты.
+    Освобождает просроченные посты. Возвращает список событий для уведомлений:
 
-    Два случая:
-    1. Жюри взял пост (TakenAt IS NOT NULL) но не проверил за expire_minutes
-       → Reviewer=NULL, TakenAt=NULL, Status='pending'
-       → в режиме distributed сразу переназначается новому жюри
-       → уведомляем старого жюри что пост забрали,
-         и нового жюри (distributed) что ему назначен пост
+      {post_id, reviewer_tgid, type: 'reassigned'}  — этому жюри назначили пост
+      {post_id, type: 'free'}                        — пост стал свободным (open)
 
-    2. В режиме distributed пост назначен (Reviewer IS NOT NULL)
-       но не взят (TakenAt IS NULL) за expire_minutes
-       → переназначается другому жюри
-       → без уведомления (старый жюри ещё даже не видел пост,
-         новый получит уведомление)
+    Логика:
+      Таймаут считается ТОЛЬКО пока пост назначен но не взят (TakenAt IS NULL).
+      Если жюри уже взял пост (/next) — таймаут не действует, пусть проверяет.
 
-    Возвращает список:
-      {post_id, reviewer_tgid, type: 'taken'}         — для уведомления старого жюри
-      {post_id, reviewer_tgid, type: 'reassigned'}    — для уведомления нового жюри
+      distributed/balanced, AssignedAt истёк → переназначаем другому
+      open, AssignedAt истёк                 → невозможно (в open Reviewer=NULL сразу)
     """
-    expire = EXPIRE_MINUTES
+    expire   = EXPIRE_MINUTES
     released = []
 
     with get_db() as db:
-        # Case 1: взят но не проверен
-        taken = db.execute(
-            f"""
-            SELECT q.Post, q.Reviewer
-            FROM queue q
-            JOIN posts_info p ON q.Post = p.ID
-            WHERE q.TakenAt IS NOT NULL
-              AND p.Status = 'checking'
-              AND datetime(q.TakenAt) <= datetime('now', '-{expire} minutes')
-            """
-        ).fetchall()
-
-        for row in taken:
-            db.execute(
-                "UPDATE queue SET Reviewer=NULL, TakenAt=NULL WHERE Post=?",
-                (row["Post"],),
-            )
-            db.execute(
-                "UPDATE posts_info SET Status='pending' WHERE ID=?",
-                (row["Post"],),
-            )
-            db.commit()
-            released.append({
-                "post_id":       row["Post"],
-                "reviewer_tgid": row["Reviewer"],
-                "type":          "taken",
-            })
-            log.info(f"[queue] Пост #{row['Post']} истёк (взят) у {row['Reviewer']}")
-
-            # В режиме distributed — сразу переназначаем новому жюри
-            if QUEUE_MODE == "distributed":
-                new_tgid = _reviewer_with_least_queue()
-                if new_tgid and new_tgid != row["Reviewer"]:
-                    with get_db() as db2:
-                        db2.execute(
-                            "UPDATE queue SET Reviewer=?, AssignedAt=? WHERE Post=?",
-                            (new_tgid, _now_utc(), row["Post"]),
-                        )
-                        db2.commit()
-                    released.append({
-                        "post_id":       row["Post"],
-                        "reviewer_tgid": new_tgid,
-                        "type":          "reassigned",
-                    })
-                    log.info(f"[queue] Пост #{row['Post']} переназначен → {new_tgid}")
-
-        # Case 2: назначен но не взят (только distributed)
         assigned = db.execute(
             f"""
             SELECT q.Post, q.Reviewer
@@ -317,35 +306,46 @@ def release_expired_posts() -> list[dict]:
         ).fetchall()
 
         for row in assigned:
-            db.execute(
-                "UPDATE queue SET Reviewer=NULL WHERE Post=?",
-                (row["Post"],),
-            )
-            db.commit()
-            log.info(f"[queue] Пост #{row['Post']} истёк (назначен) у {row['Reviewer']}")
+            post_id      = row["Post"]
+            old_reviewer = row["Reviewer"]
 
-            # Переназначаем другому жюри
-            new_tgid = _reviewer_with_least_queue()
-            if new_tgid and new_tgid != row["Reviewer"]:
+            log.info(f"[queue] Пост #{post_id} истёк (назначен) у {old_reviewer}")
+
+            # Переназначаем другому
+            new_tgid = _pick_reviewer()
+            if new_tgid and new_tgid != old_reviewer:
                 with get_db() as db2:
                     db2.execute(
                         "UPDATE queue SET Reviewer=?, AssignedAt=? WHERE Post=?",
-                        (new_tgid, _now_utc(), row["Post"]),
+                        (new_tgid, _now_utc(), post_id),
                     )
                     db2.commit()
                 released.append({
-                    "post_id":       row["Post"],
+                    "post_id":       post_id,
                     "reviewer_tgid": new_tgid,
                     "type":          "reassigned",
                 })
-                log.info(f"[queue] Пост #{row['Post']} переназначен → {new_tgid}")
+                log.info(f"[queue] Пост #{post_id} переназначен → {new_tgid}")
+            else:
+                # Некому переназначить — освобождаем совсем
+                with get_db() as db2:
+                    db2.execute(
+                        "UPDATE queue SET Reviewer=NULL WHERE Post=?",
+                        (post_id,),
+                    )
+                    db2.commit()
+                released.append({
+                    "post_id": post_id,
+                    "type":    "free",
+                })
+                log.info(f"[queue] Пост #{post_id} стал свободным (нет других жюри)")
 
-    taken_count     = sum(1 for r in released if r["type"] == "taken")
-    reassigned_count = sum(1 for r in released if r["type"] == "reassigned")
-    if taken_count:
-        log.info(f"[queue] Освобождено просроченных (взятых): {taken_count}")
-    if reassigned_count:
-        log.info(f"[queue] Переназначено: {reassigned_count}")
+    reassigned_cnt = sum(1 for r in released if r["type"] == "reassigned")
+    free_cnt       = sum(1 for r in released if r["type"] == "free")
+    if reassigned_cnt:
+        log.info(f"[queue] Переназначено: {reassigned_cnt}")
+    if free_cnt:
+        log.info(f"[queue] Стало свободными: {free_cnt}")
 
     return released
 
@@ -353,7 +353,6 @@ def release_expired_posts() -> list[dict]:
 # ── Статистика ────────────────────────────────────────────────────────────────
 
 def get_queue_count(tgid: str) -> int:
-    """Количество постов в очереди конкретного жюри."""
     with get_db() as db:
         row = db.execute(
             "SELECT COUNT(*) FROM queue WHERE Reviewer=?", (tgid,)
@@ -362,7 +361,6 @@ def get_queue_count(tgid: str) -> int:
 
 
 def get_total_queue_count() -> int:
-    """Общее количество постов в очереди (уникальных)."""
     with get_db() as db:
         row = db.execute(
             """
@@ -375,7 +373,6 @@ def get_total_queue_count() -> int:
 
 
 def get_free_posts_count() -> int:
-    """Количество свободных постов (Reviewer IS NULL)."""
     with get_db() as db:
         row = db.execute(
             """
@@ -388,7 +385,6 @@ def get_free_posts_count() -> int:
 
 
 def get_all_reviewer_queue_sizes() -> list[dict]:
-    """Возвращает размер очереди каждого верифицированного жюри."""
     with get_db() as db:
         rows = db.execute(
             """
@@ -401,3 +397,4 @@ def get_all_reviewer_queue_sizes() -> list[dict]:
             """
         ).fetchall()
     return [{"tgid": r["TGID"], "name": r["Name"], "count": r["cnt"]} for r in rows]
+

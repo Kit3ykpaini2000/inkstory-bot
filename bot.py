@@ -187,7 +187,12 @@ async def job_new_day(context):
 
 async def job_check_expired(context):
     """
-    Каждые 5 минут освобождает просроченные посты и уведомляет жюри.
+    Каждые N минут переназначает посты которые назначены но не взяты за EXPIRE_MINUTES.
+    Взятые посты (жюри нажал /next) таймаут не затрагивает.
+
+    Типы событий из release_expired_posts():
+      reassigned — этому жюри переназначили пост
+      free       — пост стал свободным (некому переназначить)
     """
     from parser.queue_manager import release_expired_posts, get_free_posts_count
 
@@ -195,29 +200,9 @@ async def job_check_expired(context):
     if not released:
         return
 
-    log.info(f"[expired] Освобождено: {len(released)}")
+    log.info(f"[expired] Событий: {len(released)}")
 
-    notified_taken = set()
-
-    # Уведомляем жюри у которых забрали посты
-    for item in released:
-        if item["type"] != "taken":
-            continue
-        tgid = item["reviewer_tgid"]
-        notified_taken.add(tgid)
-        try:
-            await context.bot.send_message(
-                chat_id=tgid,
-                text=(
-                    "⏰ У тебя истекло время на проверку!\n\n"
-                    "Пост возвращён в очередь.\n\n"
-                    "Если хочешь продолжить — используй /next."
-                ),
-            )
-        except Exception as e:
-            log.warning(f"[expired] Не удалось уведомить {tgid}: {e}")
-
-    # Уведомляем новых жюри которым переназначили посты (distributed)
+    already_notified: set[str] = set()
     reassigned: dict[str, int] = {}
     for item in released:
         if item["type"] != "reassigned":
@@ -226,24 +211,27 @@ async def job_check_expired(context):
         reassigned[tgid] = reassigned.get(tgid, 0) + 1
 
     for tgid, count in reassigned.items():
+        already_notified.add(tgid)
+        s = "ы" if count > 1 else ""
         try:
             await context.bot.send_message(
                 chat_id=tgid,
                 text=(
-                    f"📬 Тебе назначен{'ы' if count > 1 else''} пост{'ы' if count > 1 else''}!\n\n"
-                    f"🔄 Переназначено из-за истечения времени у другого жюри: {count}\n\n"
+                    f"📬 Тебе назначен{s} {count} пост{s}!\n\n"
+                    f"🔄 Переназначено из-за истечения времени у другого жюри.\n\n"
                     f"/next — взять пост"
                 ),
             )
         except Exception as e:
             log.warning(f"[expired] Не удалось уведомить {tgid}: {e}")
 
-    # В режиме open уведомляем остальных жюри о свободных постах
-    free_count = get_free_posts_count()
-    if free_count > 0:
-        notified = notified_taken | set(reassigned.keys())
+    # 3. Если появились свободные посты (type='free') — уведомляем ВСЕХ остальных жюри
+    free_events = [r for r in released if r["type"] == "free"]
+    if free_events:
+        free_count = get_free_posts_count()
+        # Уведомляем всех верифицированных жюри кроме тех кого уже уведомили
         for tgid in _get_all_reviewer_ids():
-            if tgid in notified:
+            if tgid in already_notified:
                 continue
             try:
                 await context.bot.send_message(
