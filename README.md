@@ -144,7 +144,7 @@ python cli.py
 
 ## Changelog
 
-### v3.0
+### v2.3
 - Удалён режим `distributed` — остались `balanced` и `open`
 - `bot.py` переименован в `main.py`, отдельный `main.py` (парсер) удалён
 - Задачи планировщика вынесены в `bot/scheduler.py`
